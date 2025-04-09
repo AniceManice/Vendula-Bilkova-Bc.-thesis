@@ -1,0 +1,366 @@
+---
+title: "VOCs Vendy"
+author: "Anna Mrazova"
+date: "2025-03-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# VOC analyses
+
+## Used libraries
+
+```{r libraries}
+library(Matrix)
+library(lme4)
+library(dplyr)
+library(tidyverse)
+library(car)
+library(glmmTMB)
+library(emmeans)
+library(MuMIn)
+library(DHARMa)
+library(vegan)
+library(ggplot2)
+library(FactoMineR)
+library(factoextra)
+library(dplyr)
+library(tidyr)
+library(tibble)
+```
+
+## 1 STROMY BEZ MeJA
+## A) mnozství VOC ~ druh
+
+### Data filtering
+```{r data 1A}
+setwd("C:/Users/annam/OneDrive - Biologické centrum AV ČR, v. v. i/Anawork/Students/Vendula Bilkova/Data/voc")
+data1A <- read.csv2("RStudio data 1.csv", dec = ",", header = TRUE, stringsAsFactors = FALSE)
+data1A <- subset(data1A, grepl("kontr_pid|kontr_ostruh", Treatment, ignore.case = TRUE))
+data1A <- subset(data1A, Compound == "Total_Standard")
+data1A$Treatment <- as.factor(data1A$Treatment)
+data1A$Value <- as.numeric(data1A$Value)
+```
+
+### Perform appropriate test
+#### Based on data diagnosis tests:
+#### **1)** check for normality and equal variaces hold, we we go for a simple t-test
+#### **2)** If normality is violated, go for non-parametric wilcoxon test
+```{r test 1A}
+# Check normality assumption per group
+shapiro_test_ostr <- shapiro.test(data1A$Value[data1A$Treatment == "kontr_ostruh"])
+shapiro_test_pid <- shapiro.test(data1A$Value[data1A$Treatment == "kontr_pid"])
+
+if (shapiro_test_ostr$p.value > 0.05 & shapiro_test_pid$p.value > 0.05) {
+  if (levene_test$`Pr(>F)`[1] > 0.05) {
+       test_result <- t.test(Value ~ Treatment, data = data1A, var.equal = TRUE)
+  }
+} else {
+    test_result <- wilcox.test(Value ~ Treatment, data = data1A)
+}
+print(test_result)
+```
+
+### Visualisation 
+```{r visualisation 1A}
+ggplot(data1A, aes(x = Treatment, y = Value, fill = Treatment)) +
+  geom_boxplot(alpha = 0.6) +
+  geom_jitter(width = 0.2, alpha = 0.7) +
+  theme_minimal() +
+  labs(title = "Comparison of VOC abundance between treatments",
+       y = "Total VOC abundance",
+       x = "Treatment")
+```
+
+### Results t-test
+#### wilcoxon test for non normally distributed data - **treatment has no effect**.
+
+## B) an overall VOC variation between treatments - PCA
+### Data manipulation
+```{r data 1B}
+data1B <- read.csv2("RStudio data 1.csv", dec = ",", header = TRUE, stringsAsFactors = FALSE)
+data1B <- subset(data1B, grepl("kontr_pid|kontr_ostruh", Treatment, ignore.case = TRUE))
+data1B <- data1B %>% filter(Compound != "Total_Standard")
+
+# log transformation for values
+data1B$log_Value <- log(data1B$Value)
+
+# Prepare VOC data in wide format
+VOC_matrix <- data1B %>%
+  select(ID, Compound, log_Value) %>%
+  pivot_wider(names_from = Compound, values_from = log_Value) %>%
+  left_join(data1B %>% select(ID, Treatment) %>% distinct(), by = "ID") %>%
+  column_to_rownames(var = "ID")
+
+# Convert Treatment to a factor
+VOC_matrix$Treatment <- as.factor(VOC_matrix$Treatment)
+```
+
+### PCA 1
+```{r PCA1}
+# Run PCA excluding the Treatment column
+pca_result <- PCA(VOC_matrix %>% select(-Treatment), scale.unit = TRUE, graph = FALSE)
+
+# Visualize PCA with treatment groups
+palette_colors <- c("red", "blue")
+fviz_pca_ind(pca_result, 
+             label = "none", 
+             habillage = VOC_matrix$Treatment,
+             addEllipses = TRUE,  
+             ellipse.level = 0.95,
+             palette = palette_colors)
+```
+
+### Results PCA
+#### **Separation Between Treatments:**
+#### The two groups (red: kontr_ostruh, blue: kontr_pid) show partial separation. There is some overlap, but kontr_pid (blue) seems to be more dispersed, while kontr_ostruh (red) is more concentrated.
+
+#### **Main Variation Explained by Dim1 (41.2%):**
+#### The first principal component (Dim1) explains 41.2% of the variation in VOC profiles. This suggests that a large proportion of VOC variation is associated with treatment differences. The separation along Dim1 suggests that kontr_ostruh and kontr_pid may emit VOCs at different intensities or compositions.
+
+#### **Dim2 (15.4%) Shows Additional Variation:**
+#### There is some vertical spread, but it’s less structured compared to Dim1. This might reflect individual variation rather than a treatment effect.
+
+#### **Ellipses Indicate Group Variability:**
+#### The blue ellipse (kontr_pid) is larger, suggesting higher within-group variance. The red ellipse (kontr_ostruh) is more compact, meaning these samples have more similar VOC profiles.
+
+## C) Effect of treatment (species feeding) on individual compounds
+
+### Fitting model and variable selection
+``` {r models 1C}
+model1C <- glmer(Value ~ Treatment * Compound + (1|ID), data = data1B, family = Gamma(link = "log"))
+
+model1C <- glmmTMB(Value ~ Treatment * Compound + (1|ID), data = data1B, family = Gamma(link = "log"))
+
+reduced1 <- update(model1C, . ~ . - Compound)                 
+reduced2 <- update(model1C, . ~ . - Treatment)              
+reduced3 <- update(model1C, . ~ . - Compound:Treatment)
+Null <- glmmTMB(Value ~ 1 + (1|ID), data = data1B, family = Gamma(link = "log"))
+
+# Compare models using AICc
+models_list <- list(model1C, reduced1, reduced2, reduced3, Null)
+model_selection <- model.sel(models_list, rank = AICc)
+print(model_selection)
+
+# Diagnosis check
+simulationOutput <- simulateResiduals(fittedModel = model1C, n = 1000)
+plot(simulationOutput)
+testDispersion(simulationOutput)
+hist(data1B$Value, breaks = 30, main = "Histogram of VOC abundance", xlab = "Value")
+
+# -> log transformarion
+data1B$log_Value <- log(data1B$Value)
+
+model_logT <- glmmTMB(log_Value ~ Treatment * Compound + (1|ID), 
+                      data = data1B, family = gaussian)
+simulationOutput_logT <- simulateResiduals(fittedModel = model_logT, n = 1000)
+plot(simulationOutput_logT)
+
+summary(model_logT)
+
+emmeans(model_logT, pairwise ~ Treatment, by = "Compound", type = "response")
+```
+
+### Results
+
+#### A post-hoc analysis was conducted using estimated marginal means (EMMs) to compare VOC levels between treatments for each compound. Some key findings:
+
+#### **Significant Differences:**
+#### **Methyl salicylate:** Significantly higher in kontr_ostruh than in kontr_pid (p=0.0006p=0.0006).
+#### ***Unknown 19:** lower in kontr_pid (p=0.0497p=0.0497), suggesting a species-specific reduction.
+
+#### **Non-Significant Differences (but):**
+#### Many other compounds showed minor differences but did not reach statistical significance. Some unknown compounds (Unknown 10, 11, 14, 21) showed a tendency towards treatment-related variation, but their confidence intervals overlapped.
+
+### Final Interpretation:
+
+#### The overall effect of trvidual compounds is weak, but specific VOCs, particularly Methyl salicylate and Unknown 19, appear to differ significantly.
+#### The PCA earlier suggested that VOC profiles are structured by treatment, but when zooming in on individual compounds, many do not differ significantly.
+#### The treatment effect likely depends on the compound, suggesting that some VOCs are more sensitive to herbivory by specific species.
+#### Implications: These results indicate that herbivore species identity may influence VOC emissions, but only for select compounds.
+
+## 2) POROVNANI VOC u MeJA vs zrano housenkou
+# A) mnozstvi VOC ~ druh housenky * treatment + (1|strom)
+
+### Data filtering
+```{r data 2A}
+data2A <- read.csv2("RStudio data 1.csv", dec = ",", header = TRUE, stringsAsFactors = FALSE)
+data2A <- subset(data2A, Compound == "Total_Standard")
+data2A <- data2A %>% filter(Treatment %in% c("meja_ostruh", "meja_pid"))
+data2A$Treatment <- as.factor(data2A$Treatment)
+data2A$Value <- as.numeric(data2A$Value)
+```
+
+### Perform appropriate test
+#### Based on data diagnosis tests:
+#### **1)** check for normality and equal variaces hold, we we go for a simple t-test
+#### **2)** If normality is violated, go for non-parametric wilcoxon test
+```{r test 2A}
+# Check normality assumption per group
+shapiro_test_ostr <- shapiro.test(data2A$Value[data2A$Treatment == "meja_ostruh"])
+shapiro_test_pid <- shapiro.test(data2A$Value[data2A$Treatment == "meja_pid"])
+
+if (shapiro_test_ostr$p.value > 0.05 & shapiro_test_pid$p.value > 0.05) {
+  if (levene_test$`Pr(>F)`[1] > 0.05) {
+    test_result <- t.test(Value ~ Treatment, data = data2A, var.equal = TRUE)
+  }
+} else {
+  test_result <- wilcox.test(Value ~ Treatment, data = data2A)
+}
+
+print(test_result)
+```
+
+### Visualisation 
+```{r visualisation 2A}
+ggplot(data2A, aes(x = Treatment, y = Value, fill = Treatment)) +
+  geom_boxplot(alpha = 0.6) +
+  geom_jitter(width = 0.2, alpha = 0.7) +
+  theme_minimal() +
+  labs(title = "Comparison of VOC abundance between treatments",
+       y = "Total VOC abundance",
+       x = "Treatment")
+```
+
+### Results t-test 2A
+#### wilcoxon test for non normally distributed data - **treatment has a significant effect**.
+
+## 2 B) an overall VOC variation between treatments - PCA
+### Data manipulation
+```{r data 2B}
+data2B <- read.csv2("RStudio data 1.csv", dec = ",", header = TRUE, stringsAsFactors = FALSE)
+data2B <- data2B %>% filter(Treatment %in% c("meja_ostruh", "meja_pid"))
+data2B <- data2B %>% 
+  filter(Compound != "Total_Standard")
+
+data2B$log_Value <- log(data2B$Value)
+
+VOC_matrix <- data2B %>%
+  select(ID, Compound, log_Value) %>%
+  pivot_wider(names_from = Compound, values_from = log_Value) %>%
+  left_join(data2B %>% select(ID, Treatment) %>% distinct(), by = "ID") %>%
+  column_to_rownames(var = "ID")
+
+VOC_matrix$Treatment <- as.factor(VOC_matrix$Treatment)
+```
+
+### PCA 2
+```{r PCA2}
+pca_result <- PCA(VOC_matrix %>% select(-Treatment), scale.unit = TRUE, graph = FALSE)
+
+palette_colors <- c("red", "blue")
+
+fviz_pca_ind(pca_result, 
+             label = "none", 
+             habillage = VOC_matrix$Treatment,
+             addEllipses = TRUE,  
+             ellipse.level = 0.95,
+             palette = palette_colors)
+```
+
+### Results PCA
+
+#### **Separation Between Treatments:**
+#### The first principal component (Dim1, 47.6%) captures nearly half of the variation in the dataset.Meja_ostruh (red) and meja_pid (blue) are separated along this axis, indicating that VOC profiles are systematically different between treatments.Meja_pid shows less variation and is more tightly clustered, suggesting more consistent VOC production. Meja_ostruh has a wider spread, indicating greater variability in VOC composition.
+
+#### **Ellipses Represent Confidence Intervals (95% CI):**
+#### The red ellipse (for meja_ostruh) is larger, suggesting more variation in VOC profiles. The blue ellipse (meja_pid) is tighter and more compact, meaning lower variation in VOC responses. The overlap is small, reinforcing that meja_ostruh and meja_pid have distinct VOC profiles.
+
+#### **Biological Interpretation:**
+#### meja_ostruh appears to induce a stronger and more variable VOC response, which might be linked to plant defense activation. Meja_pid, in contrast, seems to reduce VOC diversity or stabilize the response, potentially suppressing certain compounds.
+
+## C) Effect of treatment (species feeding) on individual compounds when MeJA treated
+
+### Fitting model and variable selection
+``` {r models 2C}
+
+model2B <- glmer(Value ~ Treatment * Compound + (1|ID), data = data2B, family = Gamma(link = "log"))
+#convergence issue ->
+
+model2B <- glmmTMB(Value ~ Treatment * Compound + (1|ID), data = data2B, family = Gamma(link = "log"))
+
+reduced1 <- update(model2B, . ~ . - Compound)                 
+reduced2 <- update(model2B, . ~ . - Treatment)              
+reduced3 <- update(model2B, . ~ . - Compound:Treatment)
+Null <- glmmTMB(Value ~ 1 + (1|ID),  
+                data = data2B, family = Gamma(link = "log"))
+
+# Compare models using AICc
+models_list <- list(model2B, reduced1, reduced2, reduced3, Null)
+model_selection <- model.sel(models_list, rank = AICc)
+print(model_selection)
+
+simulationOutput <- simulateResiduals(fittedModel = model2B, n = 1000)
+plot(simulationOutput)
+testDispersion(simulationOutput)
+
+hist(data2B$Value, breaks = 30, main = "Histogram of VOC Abundance", xlab = "Value")
+
+# data are scewed -> use the log transformation
+
+model_logT <- glmmTMB(log_Value ~ Treatment * Compound + (1|ID), 
+                      data = data2B, family = gaussian)
+simulationOutput_logT <- simulateResiduals(fittedModel = model_logT, n = 1000)
+plot(simulationOutput_logT)
+
+summary(model_logT)
+
+emmeans(model_logT, pairwise ~ Treatment, by = "Compound", type = "response")
+```
+
+### Results
+
+#### **1. Key Ecological Question:**
+#### Which VOC compounds show a significantly different response depending on the treatment (meja_pid vs. meja_ostruh), and what does this mean ecologically?
+  
+#### **2. How to Identify Significant Interactions**
+#### We focus on interaction terms in the model: Treatment×Compound
+#### This tells us whether the effect of meja_pid depends on the specific compound.
+
+#### **Significant interaction term:**
+#### Treatmentmeja_pid:CompoundMethyl_salicilate_Standard (p = 0.033)
+#### Interpretation: The effect of meja_pid differs significantly for Methyl salicylate compared to meja_ostruh.
+
+#### **Near-significant interactions (0.05 < p < 0.1):**
+#### Treatmentmeja_pid:CompoundUnknown_13_Standard (p = 0.072)
+#### Treatmentmeja_pid:CompoundUnknown_6_Standard (p = 0.068)
+#### These might still be biologically meaningful, even if they don’t reach strict statistical significance.
+
+#### **3. Breakdown of pairwise comparisons (emmeans)**
+#### Which compounds show a strong difference between meja_pid and meja_ostruh?
+
+#### **Strongly suppressed in meja_pid:**
+
+#### Unknown_1_Standard (p = 0.0002)
+#### meja_ostruh: 12.38, meja_pid: 10.57
+
+#### Unknown_14_Standard (p = 0.0055)
+#### meja_ostruh: 14.10, meja_pid: 12.74
+
+#### Unknown_21_Standard (p = 0.0001)
+#### meja_ostruh: 14.23, meja_pid: 12.29
+
+#### 2-Decen-1-ol_Standard (p = 0.036)
+#### meja_ostruh: 16.67, meja_pid: 15.65
+
+#### Butan-1-ol_Standard (p = 0.0078)
+#### meja_ostruh: 16.18, meja_pid: 14.88
+
+#### **Near-significant**
+  
+#### Unknown_13_Standard (p = 0.072)
+#### Unknown_6_Standard (p = 0.068)
+#### Unknown_18_Standard (p = 0.074)
+
+#### **Takeaway**: Certain unknown compounds and well-known defensive VOCs (e.g., Methyl salicylate, Butan-1-ol) are strongly affected by the interaction between treatment and compound type.
+
+#### **4. Ecological Interpretation**
+#### 1) What does meja_pid do to VOCs?
+#### Many defensive compounds (Methyl salicylate, Butan-1-ol) and unknowns are significantly reduced under meja_pid.
+#### This could suggest that **meja_pid suppresses VOC emissions involved in plant defense.**
+
+#### 2) What about meja_ostruh?
+#### meja_ostruh consistently shows higher levels of VOCs, suggesting it maintains or increases VOC emissions.
